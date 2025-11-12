@@ -1,0 +1,65 @@
+name: Propagate branches downstream (master → development → feature)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - development
+
+permissions:
+  contents: write
+
+jobs:
+  cascade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch all branches
+        run: git fetch --all --prune
+
+      - name: Sync development from master (if triggered by master)
+        if: github.ref == 'refs/heads/master'
+        run: |
+          set -e
+          if git show-ref --verify --quiet refs/heads/development; then
+            git checkout development
+            git merge --ff-only master || git merge master -m "chore: sync development with master"
+            git push origin development
+          else
+            echo "development branch missing; creating from master"
+            git checkout master
+            git checkout -b development
+            git push origin development
+          fi
+
+      - name: Sync feature branches from development (if triggered by development)
+        if: github.ref == 'refs/heads/development'
+        run: |
+          set -e
+          git checkout development
+          # List feature branches convention: feature/*
+          FEATURE_BRANCHES=$(git branch -r | sed 's/origin\///' | grep '^feature/' || true)
+          if [ -z "$FEATURE_BRANCHES" ]; then
+            echo "No feature/* branches to sync"
+            exit 0
+          fi
+          for BR in $FEATURE_BRANCHES; do
+            echo "Syncing $BR from development"
+            git checkout $BR
+            git merge --ff-only development || git merge development -m "chore: sync $BR with development"
+            git push origin $BR
+          done
+
+      - name: Summary
+        run: |
+          echo "Branch cascade complete (ref: $GITHUB_REF)"

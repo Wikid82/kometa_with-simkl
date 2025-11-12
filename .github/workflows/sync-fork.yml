@@ -1,0 +1,66 @@
+name: Sync fork from upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: "Upstream repo in owner/repo form (optional)"
+        required: false
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine upstream
+        id: upstream
+        run: |
+          set -e
+          # 1) Prefer manual input if provided
+          if [ -n "${{ github.event.inputs.upstream }}" ]; then
+            echo "upstream=${{ github.event.inputs.upstream }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 2) Try to auto-detect the parent repo for forks via GitHub API
+          DETECTED=$(gh api repos/${GITHUB_REPOSITORY} --jq '.parent.full_name' 2>/dev/null || true)
+          if [ -n "$DETECTED" ] && [ "$DETECTED" != "null" ]; then
+            echo "upstream=$DETECTED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "No upstream configured or detected. Provide via workflow_dispatch input 'upstream' (owner/repo)." >&2
+          # Not failing the job; simply exiting without syncing
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+
+      - name: Add upstream remote and fetch
+        if: steps.upstream.outputs.skip != 'true'
+        run: |
+          git remote add upstream "https://github.com/${{ steps.upstream.outputs.upstream }}.git" 2>/dev/null || \
+          git remote set-url upstream "https://github.com/${{ steps.upstream.outputs.upstream }}.git"
+          git fetch upstream --prune
+
+      - name: Sync master from upstream
+        if: steps.upstream.outputs.skip != 'true'
+        run: |
+          set -e
+          git checkout master
+          # Try fast-forward first
+          if ! git merge --ff-only upstream/master; then
+            # Fallback to a merge commit to keep history moving
+            git merge upstream/master -m "chore: sync fork with upstream master"
+          fi
+          git push origin master
